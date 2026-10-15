@@ -33,6 +33,11 @@ not required. If they are installed, PyVISA uses them automatically.
    capture stays on screen. A partial capture is shown only if no complete capture exists.
 4. Zoom with the toolbar buttons, the mouse wheel, or **Box Zoom**. A zoom set during a run
    is kept for later captures. The statistics line covers the displayed window.
+   **Style** selects Line, Line + points, or Points:
+   - **Line + points** adds markers once samples are at least 3 px apart on screen, so
+     zoom in to see them.
+   - **Points** always shows markers. Zoomed out, each marker is the min or max of a group
+     of samples.
 5. **Save View…** writes only the displayed samples; **Save All…** writes the whole capture.
    Saving works when stopped, and in Manual mode while the DMM is armed. CSV files carry a
    `#` metadata header (`pandas.read_csv(path, comment="#")`). Use `.npz` for large captures.

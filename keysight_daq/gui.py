@@ -17,6 +17,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QWidgetAction,
 )
 
 from . import export
@@ -30,6 +31,34 @@ TRIGGER_MODES = (("Auto (continuous)", TriggerSource.IMMEDIATE), ("Manual", Trig
 LIVE_PLOT_PERIOD = 0.25        # s between plot refreshes while acquiring
 HISTORY_LENGTH = 10
 DEFAULT_RANGE = {Function.DCV: 10.0, Function.DCI: 0.1}
+PLOT_STYLES = ("Line", "Line + points", "Points")
+TRACE_COLOR = "#f0c000"
+MARKER_SIZE = 5
+MARKER_MIN_SPACING = 3.0       # px between samples before "Line + points" draws markers
+
+
+class TraceItem(pg.PlotDataItem):
+    """Evenly sampled trace whose auto-range bounds cover the full data set.
+
+    With clip-to-view, PlotDataItem measures only the visible slice, so Fit, the "A" button
+    and "View All" can't zoom back out. Even sample spacing makes full-data bounds cheap.
+    """
+
+    def dataBounds(self, ax, frac=1.0, orthoRange=None):
+        x, y = self.xData, self.yData
+        if x is None or len(x) == 0:
+            return None, None
+        if ax == 0:
+            return float(x[0]), float(x[-1])
+        if orthoRange is not None and len(x) > 1 and x[1] > x[0]:
+            dx = x[1] - x[0]
+            start = max(0, math.ceil((orthoRange[0] - x[0]) / dx))
+            stop = min(len(y), math.floor((orthoRange[1] - x[0]) / dx) + 1)
+            y = y[start:stop]
+        finite = y[np.isfinite(y)]
+        if finite.size == 0:
+            return None, None
+        return float(finite.min()), float(finite.max())
 
 
 class _WorkerHooks(CaptureHooks):
@@ -166,6 +195,8 @@ class MainWindow(QMainWindow):
         self._run_captures = 0                   # complete captures in this run
         self._new_run = False                    # next capture is the first of a run
         self._live_time: np.ndarray | None = None
+        self._display_interval: float | None = None  # sample interval of the trace on screen
+        self._markers_shown: bool | None = None
         self._range_choice = {f: self.settings.value(f"range/{f.name}", DEFAULT_RANGE[f], float) for f in Function}
 
         self._build_ui()
@@ -332,6 +363,15 @@ class MainWindow(QMainWindow):
         self.box_zoom_btn.setToolTip("Drag a rectangle to zoom. When off, drag pans; wheel zooms; right-drag scales.")
         self.box_zoom_btn.toggled.connect(self._on_box_zoom)
         bar.addWidget(self.box_zoom_btn)
+        bar.addSpacing(12)
+        bar.addWidget(QLabel("Style"))
+        self.plot_style = QComboBox()
+        self.plot_style.addItems(PLOT_STYLES)
+        self.plot_style.setToolTip(
+            "Line + points: markers appear once you zoom in far enough to tell samples apart.\n"
+            "Points: markers only. Zoomed out, each marker is the min or max of a group of samples.")
+        self.plot_style.currentIndexChanged.connect(self._apply_plot_style)
+        bar.addWidget(self.plot_style)
         bar.addStretch(1)
         self.save_view_btn = QPushButton("Save View…")
         self.save_view_btn.setToolTip("Save the samples in the displayed time window (Ctrl+S)")
@@ -356,8 +396,24 @@ class MainWindow(QMainWindow):
         self.plot.setDownsampling(auto=True, mode="peak")
         self.plot.setClipToView(True)
         self.plot.getViewBox().setAutoVisible(y=True)
-        self.curve = self.plot.plot(pen=pg.mkPen("#f0c000", width=1))
-        self.plot.getViewBox().sigXRangeChanged.connect(lambda *_: self._stats_timer.start())
+        self._trace_pen = pg.mkPen(TRACE_COLOR, width=1)
+        self.curve = TraceItem(pen=self._trace_pen)
+        self.plot.addItem(self.curve)
+        self.curve.setSymbolSize(MARKER_SIZE)
+        self.curve.setSymbolBrush(TRACE_COLOR)
+        self.curve.setSymbolPen(None)
+        vb = self.plot.getViewBox()
+        vb.sigXRangeChanged.connect(lambda *_: self._stats_timer.start())
+        vb.sigXRangeChanged.connect(self._update_markers)
+        vb.sigResized.connect(self._update_markers)
+        # pyqtgraph's context-menu "Points" option only affects curves that already have a symbol,
+        # so it does nothing here; the Style box replaces it.
+        plot_item = self.plot.getPlotItem()
+        for action in plot_item.ctrlMenu.actions():
+            submenu = action.menu()
+            if submenu and any(isinstance(a, QWidgetAction) and a.defaultWidget() is plot_item.ctrl.pointsGroup
+                               for a in submenu.actions()):
+                action.setVisible(False)
         self.plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
         layout.addWidget(self.plot, 1)
 
@@ -407,6 +463,7 @@ class MainWindow(QMainWindow):
         self._on_function_changed()
         self.impedance.setCurrentIndex(s.value("impedance", 0, int))
         self.integration.setCurrentIndex(s.value("integration", 0, int))
+        self.plot_style.setCurrentIndex(s.value("plot_style", 0, int))
         self.trigger_mode.setCurrentIndex(s.value("trigger_mode", 0, int))
         self.rate.setValue(s.value("rate_khz", 50.0, float))
         self.duration.setValue(s.value("duration_s", 1.0, float))
@@ -421,6 +478,7 @@ class MainWindow(QMainWindow):
             s.setValue(f"range/{f.name}", value)
         s.setValue("impedance", self.impedance.currentIndex())
         s.setValue("integration", self.integration.currentIndex())
+        s.setValue("plot_style", self.plot_style.currentIndex())
         s.setValue("trigger_mode", self.trigger_mode.currentIndex())
         s.setValue("rate_khz", self.rate.value())
         s.setValue("duration_s", self.duration.value())
@@ -600,6 +658,8 @@ class MainWindow(QMainWindow):
         self._armed = False
         self._capturing = True
         self._live_time = np.arange(timing.num_samples) * timing.interval
+        self._display_interval = timing.interval
+        self._update_markers()
         self._set_progress(maximum=timing.num_samples)
         if self._new_run:
             # Fit the first capture of a run; later captures keep whatever view the user chose.
@@ -644,6 +704,8 @@ class MainWindow(QMainWindow):
 
     def _show(self, acq: Acquisition) -> None:
         self.acq = acq
+        self._display_interval = acq.interval
+        self._update_markers()
         n = len(acq.values)
         self.curve.setData(acq.time, acq.values)
         if n > 1:
@@ -696,6 +758,26 @@ class MainWindow(QMainWindow):
     def _fit(self) -> None:
         self.plot.getViewBox().autoRange(padding=0.02)
         self.plot.getViewBox().enableAutoRange(y=True)
+
+    def _apply_plot_style(self) -> None:
+        self.curve.setPen(None if self.plot_style.currentText() == "Points" else self._trace_pen)
+        self._update_markers()
+
+    def _update_markers(self, *_) -> None:
+        style = self.plot_style.currentText()
+        show = style == "Points" or (style == "Line + points" and self._samples_resolved())
+        if show != self._markers_shown:
+            self._markers_shown = show
+            self.curve.setSymbol("o" if show else None)
+
+    def _samples_resolved(self) -> bool:
+        """True when adjacent samples are at least MARKER_MIN_SPACING pixels apart on screen."""
+        if not self._display_interval:
+            return False
+        vb = self.plot.getViewBox()
+        (x0, x1), _ = vb.viewRange()
+        samples = (x1 - x0) / self._display_interval
+        return samples > 0 and vb.width() / samples >= MARKER_MIN_SPACING
 
     def _on_box_zoom(self, enabled: bool) -> None:
         vb = self.plot.getViewBox()
