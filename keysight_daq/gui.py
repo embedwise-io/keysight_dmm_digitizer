@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 
 from . import export
 from .instrument import (
-    MEMORY_MEM_OPTION, MIN_RATE, MAX_RATE_DIG, RANGES, Acquisition, CaptureHooks, DeviceInfo, DigitizerConfig,
+    MEMORY_MEM_OPTION, MAX_RATE_DIG, RANGES, Acquisition, CaptureHooks, DeviceInfo, DigitizerConfig,
     Function, Integration, Timing, TriggerSource, TruevoltDMM, range_label, resource_for,
 )
 
@@ -32,9 +32,19 @@ LIVE_PLOT_PERIOD = 0.25        # s between plot refreshes while acquiring
 HISTORY_LENGTH = 10
 DEFAULT_RANGE = {Function.DCV: 10.0, Function.DCI: 0.1}
 PLOT_STYLES = ("Line", "Line + points", "Points")
+# Sample rates offered (Hz): the front-panel Digitize 1-2-5 steps. Each is a whole number of µs.
+SAMPLE_RATES = (10, 20, 50, 100, 200, 500, 1e3, 2e3, 5e3, 10e3, 20e3, 50e3)
 TRACE_COLOR = "#f0c000"
 MARKER_SIZE = 5
 MARKER_MIN_SPACING = 3.0       # px between samples before "Line + points" draws markers
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 1000:
+        return f"{seconds:.4g} s"
+    if seconds < 3600:
+        return f"{seconds:,.0f} s"
+    return f"{seconds / 3600:.3g} h"
 
 
 class TraceItem(pg.PlotDataItem):
@@ -292,11 +302,10 @@ class MainWindow(QMainWindow):
         # Acquisition
         box = QGroupBox("Acquisition")
         form = QFormLayout(box)
-        self.rate = QDoubleSpinBox()
-        self.rate.setDecimals(3)
-        self.rate.setRange(MIN_RATE / 1e3, MAX_RATE_DIG / 1e3)
-        self.rate.setSuffix(" kHz")
-        self.rate.valueChanged.connect(self._update_summary)
+        self.rate = QComboBox()
+        for rate in SAMPLE_RATES:
+            self.rate.addItem(pg.siFormat(rate, suffix="Hz"), float(rate))
+        self.rate.currentIndexChanged.connect(self._update_summary)
         form.addRow("Sample rate", self.rate)
         self.duration = QDoubleSpinBox()
         self.duration.setDecimals(3)
@@ -465,7 +474,7 @@ class MainWindow(QMainWindow):
         self.integration.setCurrentIndex(s.value("integration", 0, int))
         self.plot_style.setCurrentIndex(s.value("plot_style", 0, int))
         self.trigger_mode.setCurrentIndex(s.value("trigger_mode", 0, int))
-        self.rate.setValue(s.value("rate_khz", 50.0, float))
+        self._select_rate(s.value("rate_hz", 50e3, float))
         self.duration.setValue(s.value("duration_s", 1.0, float))
         if geometry := s.value("geometry"):
             self.restoreGeometry(geometry)
@@ -480,7 +489,7 @@ class MainWindow(QMainWindow):
         s.setValue("integration", self.integration.currentIndex())
         s.setValue("plot_style", self.plot_style.currentIndex())
         s.setValue("trigger_mode", self.trigger_mode.currentIndex())
-        s.setValue("rate_khz", self.rate.value())
+        s.setValue("rate_hz", self.rate.currentData())
         s.setValue("duration_s", self.duration.value())
         s.setValue("geometry", self.saveGeometry())
 
@@ -497,7 +506,7 @@ class MainWindow(QMainWindow):
         return DigitizerConfig(
             function=self.current_function(),
             range=self.range.currentData(),
-            sample_rate=self.rate.value() * 1e3,
+            sample_rate=self.rate.currentData(),
             duration=self.duration.value(),
             integration=self.integration.currentData(),
             high_impedance=self.current_function() is Function.DCV and self.impedance.currentData(),
@@ -525,6 +534,20 @@ class MainWindow(QMainWindow):
         self.save_view_btn.setEnabled(has_data)
         self.save_all_btn.setEnabled(has_data)
 
+    def _select_rate(self, rate: float) -> None:
+        """Select the enabled sample rate closest to rate."""
+        model = self.rate.model()
+        enabled = [i for i in range(self.rate.count()) if model.item(i).isEnabled()]
+        self.rate.setCurrentIndex(min(enabled, key=lambda i: abs(math.log(self.rate.itemData(i) / max(rate, 1)))))
+
+    def _limit_rates(self, max_rate: float) -> None:
+        """Grey out rates the instrument can't reach (above 5 kHz without the DIG option)."""
+        model = self.rate.model()
+        for i in range(self.rate.count()):
+            model.item(i).setEnabled(self.rate.itemData(i) <= max_rate)
+        if self.rate.currentData() > max_rate:
+            self._select_rate(max_rate)
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._update_controls()
@@ -538,7 +561,7 @@ class MainWindow(QMainWindow):
         rate = 1.0 / cfg.interval
         self.summary.setText(
             f"Interval {cfg.interval * 1e6:,.0f} µs ({pg.siFormat(rate, precision=5, suffix='Sa/s')})\n"
-            f"{samples:,} samples · max {max_duration:,.4g} s"
+            f"{samples:,} samples · max {format_duration(max_duration)}"
             + ("" if self.info else " (2M memory assumed)"))
 
     # --- Instrument panel ----------------------------------------------------------------
@@ -578,7 +601,7 @@ class MainWindow(QMainWindow):
     def _on_connected(self, info: DeviceInfo) -> None:
         self.info = info
         self.device_label.setText(info.summary())
-        self.rate.setMaximum(info.max_sample_rate / 1e3)
+        self._limit_rates(info.max_sample_rate)
         msg = f"Connected to {info.model} at {info.resource}"
         if not info.has_dig:
             msg += " — DIG option not found, sample rate limited to 5 kHz (a firmware update adds DIG)"
@@ -592,7 +615,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Disconnected", 5000)
         self.info = None
         self.device_label.setText("Not connected")
-        self.rate.setMaximum(MAX_RATE_DIG / 1e3)
+        self._limit_rates(MAX_RATE_DIG)
         self._set_busy(False)
         self._update_summary()
 

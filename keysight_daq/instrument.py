@@ -35,7 +35,6 @@ MEMORY_MEM_OPTION = 2_000_000
 # Fastest timed sampling with the DIG option (0.001 PLC); without it the limit is 5 kHz.
 MAX_RATE_DIG = 50_000.0
 MAX_RATE_STD = 5_000.0
-MIN_RATE = 1.0
 
 # Overloaded readings are returned as +/-9.9E37.
 OVERLOAD_THRESHOLD = 9.0e37

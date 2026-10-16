@@ -23,7 +23,8 @@ not required. If they are installed, PyVISA uses them automatically.
 
 1. Enter the DMM's IP address (or a full VISA resource string), or press **Scan**. Choose
    the protocol (HiSLIP is the default), then press **Connect**.
-2. Choose the function, range, sample rate (kHz), acquisition time (s), and trigger mode.
+2. Choose the function, range, sample rate, acquisition time (s), and trigger mode. Sample
+   rates follow the front-panel Digitize 1-2-5 steps, from 10 Hz to 50 kHz.
 3. Press **Run** (F5):
    - **Auto (continuous):** captures repeat back-to-back until you press **Stop**.
    - **Manual:** the DMM is armed and waits. Each **Trigger** press (F6) starts one capture,
