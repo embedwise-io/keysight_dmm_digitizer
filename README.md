@@ -80,15 +80,28 @@ window can be shorter than the sample interval.
   step avoids the `-221` settings conflict the DMM raises when they are equal. This gives
   the lowest noise, and signal content between samples is averaged in rather than missed
   or aliased.
-- **Minimum** uses NPLC 0.001 (about 17 µs at 60 Hz), the same as the front-panel Digitize
-  mode: a short snapshot per sample, but noisier.
+- **Minimum** uses NPLC 0.001 (about 17 µs at 60 Hz): a short snapshot per sample, but
+  noisier. This matches front-panel Digitize mode. Its settings, read back from the meter,
+  are identical, down to the zero trigger delay.
 - At 50 kHz the interval is 20 µs and both settings are the same.
 
-Measured on the 34465A (10 V range, 4.2 V DC input):
+Noise measured on the 34465A (FW A.03.03), 1 V range, inputs shorted, 1 s captures, 60 Hz
+line, 2026-10-15:
 
-| Rate | Full interval | Minimum |
-|---|---|---|
-| 10 kHz (100 µs) | aperture 98 µs: **~55–60 µV σ** | NPLC 0.001: ~180–215 µV σ |
+| Capture | Integration | Noise σ (rms) | Peak-to-peak | Manual figure* |
+|---|---|---|---|---|
+| Front-panel Digitize, 50 kHz | NPLC 0.001 | 22.8 µV | 152 µV | 30 µV |
+| App, Minimum, 50 kHz (3 runs) | NPLC 0.001 | 18.1–22.9 µV | 148–175 µV | 30 µV |
+| App, Minimum, 10 kHz | NPLC 0.001 | 17.8 µV | 125 µV | 30 µV |
+| App, Full interval, 10 kHz | aperture 98 µs | 5.2 µV | 36 µV | 6 µV (0.006 PLC) |
+| App, Full interval, 1 kHz | aperture 998 µs | 0.9 µV | 5.8 µV | 1.5 µV (0.06 PLC) |
+
+\*The manual's 34465A resolution figure for that integration time, times the 1 V range.
+
+- **Minimum vs. front panel:** Minimum gives the same noise as front-panel Digitize.
+- **Full interval:** about 3.5× lower noise at 10 kHz and about 20× lower at 1 kHz.
+- **Offsets and pickup:** offsets were +0.7 to +2.2 µV with autozero off, and 60 Hz
+  pickup was 0.3 µV or less.
 
 If the requested rate can't be met, the DMM's minimum interval is used and a warning is
 shown. Overloaded readings (±9.9E37) are stored as NaN and appear as gaps in the plot.
