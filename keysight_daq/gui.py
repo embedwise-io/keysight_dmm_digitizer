@@ -17,7 +17,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
-    QRadioButton, QToolButton, QWidgetAction,
+    QRadioButton, QToolBar, QToolButton, QWidgetAction,
 )
 
 from . import __version__, export
@@ -271,12 +271,15 @@ class MainWindow(QMainWindow):
     # --- Construction --------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_controls())
-        splitter.addWidget(self._build_plot())
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([330, 1000])
-        self.setCentralWidget(splitter)
+        # The control panel's width comes from its contents, so it follows the desktop font size.
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        controls = self._build_controls()
+        self.splitter.addWidget(controls)
+        self.splitter.addWidget(self._build_plot())
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([controls.sizeHint().width(), 1000])
+        self.setCentralWidget(self.splitter)
         self.resize(1360, 780)
 
         shortcuts = [
@@ -292,7 +295,6 @@ class MainWindow(QMainWindow):
 
     def _build_controls(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(300)
         layout = QVBoxLayout(panel)
 
         # Instrument
@@ -303,6 +305,10 @@ class MainWindow(QMainWindow):
         self.address.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.address.lineEdit().setPlaceholderText("IP address, hostname, or VISA resource")
         self.address.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Long VISA strings (e.g. from Scan) shouldn't widen the panel; elide them in the list instead.
+        self.address.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.address.setMinimumContentsLength(15)
+        self.address.view().setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.address.editTextChanged.connect(self._update_controls)
         form.addRow("Address", self.address)
         self.protocol = QComboBox()
@@ -405,42 +411,60 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(slot)
         return btn
 
+    @staticmethod
+    def _group(*widgets: QWidget) -> QWidget:
+        """Keep related toolbar controls together, also when they move to the overflow menu."""
+        group = QWidget()
+        row = QHBoxLayout(group)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        for widget in widgets:
+            row.addWidget(widget)
+        return group
+
+    @staticmethod
+    def _tool_button(text: str, tip: str) -> QToolButton:
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setToolTip(tip)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        return btn
+
     def _build_plot(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
-        bar = QHBoxLayout()
+        # A toolbar rather than a row layout: when the window is narrow, controls that don't fit
+        # move to an overflow (») menu instead of forcing the window wider.
+        bar = QToolBar()
         buttons = [
             ("Zoom In", "Zoom in on time, Y fits the visible data (Ctrl++)", lambda: self._zoom(0.5)),
             ("Zoom Out", "Zoom out on time, Y fits the visible data (Ctrl+-)", lambda: self._zoom(2.0)),
             ("Fit", "Show all data (Ctrl+0)", self._fit),
         ]
         for text, tip, slot in buttons:
-            btn = QPushButton(text)
-            btn.setToolTip(tip)
+            btn = self._tool_button(text, tip)
             btn.clicked.connect(slot)
             bar.addWidget(btn)
-        self.box_zoom_btn = QPushButton("Box Zoom")
+        self.box_zoom_btn = self._tool_button("Box Zoom", "")
         self.box_zoom_btn.setCheckable(True)
         self.box_zoom_btn.setToolTip("Drag a rectangle to zoom. When off, drag pans; wheel zooms; right-drag scales.")
         self.box_zoom_btn.toggled.connect(self._on_box_zoom)
         bar.addWidget(self.box_zoom_btn)
-        bar.addSpacing(12)
-        bar.addWidget(QLabel("Style"))
+        bar.addSeparator()
         self.plot_style = QComboBox()
         self.plot_style.addItems(PLOT_STYLES)
         self.plot_style.setToolTip(
             "Line + points: markers appear once you zoom in far enough to tell samples apart.\n"
             "Points: markers only. Zoomed out, each marker is the min or max of a group of samples.")
         self.plot_style.currentIndexChanged.connect(self._apply_plot_style)
-        bar.addWidget(self.plot_style)
-        bar.addSpacing(12)
+        bar.addWidget(self._group(QLabel("Style"), self.plot_style))
+        bar.addSeparator()
         self.show_gaps = QCheckBox("Show gaps")
         self.show_gaps.setToolTip(
             "Shade time ranges with missing (overload) samples in red. Bands are at least "
             f"{GAP_MIN_WIDTH_PX} px wide,\nso even a single missing sample is visible when zoomed out.")
         self.show_gaps.setChecked(True)
-        bar.addWidget(self.show_gaps)
         self.prev_gap_btn = QToolButton()
         self.prev_gap_btn.setArrowType(Qt.ArrowType.LeftArrow)
         self.prev_gap_btn.setToolTip("Previous gap: zoom to the previous run of missing samples")
@@ -449,10 +473,13 @@ class MainWindow(QMainWindow):
         self.next_gap_btn.setArrowType(Qt.ArrowType.RightArrow)
         self.next_gap_btn.setToolTip("Next gap: zoom to the next run of missing samples")
         self.next_gap_btn.clicked.connect(lambda: self._goto_gap(1))
-        bar.addWidget(self.prev_gap_btn)
-        bar.addWidget(self.next_gap_btn)
-        bar.addStretch(1)
-        bar.addWidget(QLabel("Format"))
+        for btn in (self.prev_gap_btn, self.next_gap_btn):
+            btn.setAutoRaise(True)
+        bar.addWidget(self._group(self.show_gaps, self.prev_gap_btn, self.next_gap_btn))
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+        format_row = [QLabel("Format")]
         self.export_format = QButtonGroup(self)
         tips = {
             "CSV": "Text: time and value columns after a # metadata header. Opens anywhere; larger files.",
@@ -463,17 +490,16 @@ class MainWindow(QMainWindow):
             button = QRadioButton(fmt)
             button.setToolTip(tips[fmt])
             self.export_format.addButton(button)
-            bar.addWidget(button)
-        bar.addSpacing(8)
-        self.save_view_btn = QPushButton("Save View…")
-        self.save_view_btn.setToolTip("Save the samples in the displayed time window (Ctrl+S)")
+            format_row.append(button)
+        bar.addWidget(self._group(*format_row))
+        bar.addSeparator()
+        self.save_view_btn = self._tool_button("Save View…", "Save the samples in the displayed time window (Ctrl+S)")
         self.save_view_btn.clicked.connect(lambda: self._save(view_only=True))
         bar.addWidget(self.save_view_btn)
-        self.save_all_btn = QPushButton("Save All…")
-        self.save_all_btn.setToolTip("Save the complete capture")
+        self.save_all_btn = self._tool_button("Save All…", "Save the complete capture")
         self.save_all_btn.clicked.connect(lambda: self._save(view_only=False))
         bar.addWidget(self.save_all_btn)
-        layout.addLayout(bar)
+        layout.addWidget(bar)
 
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
@@ -518,6 +544,7 @@ class MainWindow(QMainWindow):
         info = QHBoxLayout()
         self.stats_label = QLabel()
         self.stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.stats_label.setWordWrap(True)  # wrap rather than force a wide window
         self.cursor_label = QLabel()
         self.cursor_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         info.addWidget(self.stats_label, 1)
@@ -573,6 +600,8 @@ class MainWindow(QMainWindow):
         self.duration.setValue(s.value("duration_s", 1.0, float))
         if geometry := s.value("geometry"):
             self.restoreGeometry(geometry)
+        if splitter := s.value("splitter"):
+            self.splitter.restoreState(splitter)
 
     def _save_settings(self) -> None:
         s = self.settings
@@ -589,6 +618,7 @@ class MainWindow(QMainWindow):
         s.setValue("rate_hz", self.rate.currentData())
         s.setValue("duration_s", self.duration.value())
         s.setValue("geometry", self.saveGeometry())
+        s.setValue("splitter", self.splitter.saveState())
 
     def _remember_address(self, text: str) -> None:
         history = [text] + [h for h in self.settings.value("history", [], list) if h != text]
@@ -699,6 +729,9 @@ class MainWindow(QMainWindow):
     def _on_connected(self, info: DeviceInfo) -> None:
         self.info = info
         self.device_label.setText(info.summary())
+        self.device_label.setToolTip(
+            f"{info.manufacturer} {info.model}\nSerial {info.serial}\nFirmware {info.firmware}\n"
+            f"Options {', '.join(sorted(info.options)) or 'none'}\n{info.resource}")
         self._limit_rates(info.max_sample_rate)
         msg = f"Connected to {info.model} at {info.resource}"
         if not info.has_dig:
@@ -713,6 +746,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Disconnected", 5000)
         self.info = None
         self.device_label.setText("Not connected")
+        self.device_label.setToolTip("")
         self._limit_rates(MAX_RATE_DIG)
         self._set_busy(False)
         self._update_summary()

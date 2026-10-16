@@ -47,7 +47,8 @@ not required. If they are installed, PyVISA uses them automatically.
    Data plots live as it arrives. If you stop part-way through a capture, the last complete
    capture stays on screen. A partial capture is shown only if no complete capture exists.
 4. Zoom with the toolbar buttons, the mouse wheel, or **Box Zoom**. A zoom set during a run
-   is kept for later captures. The statistics line covers the displayed window.
+   is kept for later captures. The statistics line covers the displayed window. In a narrow
+   window, toolbar controls that don't fit move to the **»** menu at the toolbar's right end.
    **Style** selects Line, Line + points, or Points:
    - **Line + points** adds markers once samples are at least 3 px apart on screen, so
      zoom in to see them.

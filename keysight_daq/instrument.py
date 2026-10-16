@@ -145,10 +145,13 @@ class DeviceInfo:
         return MAX_RATE_DIG if self.has_dig else MAX_RATE_STD
 
     def summary(self) -> str:
+        """Three short lines for display; the full firmware string is in the metadata."""
         opts = ", ".join(sorted(self.options)) or "none"
+        depth = self.memory_depth
+        memory = f"{depth / 1e6:g}M" if depth >= 1e6 else f"{depth / 1e3:g}k"
         return (f"{self.model} · S/N {self.serial}\n"
-                f"Firmware {self.firmware}\n"
-                f"Options {opts} · {self.memory_depth:,}-reading memory")
+                f"Firmware {self.firmware.split('-')[0]}\n"   # main revision, e.g. A.03.03
+                f"Options {opts} · {memory}-reading memory")
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,25 @@
 Notable changes to Keysight Truevolt Digitizer. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-10-16
+
+### Fixed
+
+- **Clipped control panel.** With larger desktop fonts, the control panel clipped labels
+  (e.g. "Integration") and squeezed its dropdowns. The panel now sizes itself to its
+  contents, can't be dragged narrower than that, and remembers the width you set.
+- **Forced-wide window.** The plot toolbar and statistics line no longer force a wide
+  window. Toolbar controls that don't fit move to a **»** overflow menu, and the statistics
+  line wraps.
+
+### Changed
+
+- **Instrument details.** They fit on three lines: the main firmware revision (e.g.
+  A.03.03) and the memory size (e.g. 2M). Hover for the full details. Saved files still
+  record the full firmware string.
+- **Plot toolbar.** It now uses flat toolbar buttons, with dividers between groups of
+  controls.
+
 ## [1.0.0] — 2026-10-16
 
 This is the first release. It is a desktop GUI and Python driver for high-speed digitizing
