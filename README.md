@@ -49,6 +49,17 @@ not required. If they are installed, PyVISA uses them automatically.
      zoom in to see them.
    - **Points** always shows markers. Zoomed out, each marker is the min or max of a group
      of samples.
+
+   **Show gaps** shades missing (overload) samples with translucent red bands. Each band is
+   at least 3 px wide, so a single missing sample in 100k is still visible, and bands
+   closer than a pixel merge until you zoom in. The statistics line adds "N missing in K
+   gaps" for the displayed window, and the cursor readout shows "overload" over a gap.
+   The **◀ ▶** buttons next to it jump to the previous or next gap:
+   - Each gap is centred with context: at least 200 samples, or 3× the gap length.
+   - From the full view, ▶ starts at the first gap and ◀ at the last.
+   - After you pan, they continue from where you're looking, and a zoom you've set is kept.
+   - They are enabled only when the capture has gaps in that direction, and the status bar
+     shows e.g. "Gap 3 of 9: 40 samples (800 µs) at 1.5 s".
 5. **Save View…** writes only the displayed samples; **Save All…** writes the whole capture.
    **Format** chooses CSV or HDF5 (see below). Saving works when stopped, and in Manual
    mode while the DMM is armed.
@@ -140,7 +151,9 @@ line, 2026-10-15:
   pickup was 0.3 µV or less.
 
 If the requested rate can't be met, the DMM's minimum interval is used and a warning is
-shown. Overloaded readings (±9.9E37) are stored as NaN and appear as gaps in the plot.
+shown. Overloaded readings (±9.9E37) are stored as NaN as each block arrives, so they appear
+as gaps in the plot, including during live capture. They are saved as NaN in both CSV and
+HDF5, and the warning reports how many readings were lost and in how many gaps.
 
 `instrument.py` has no GUI dependency, so you can use it from scripts or notebooks:
 

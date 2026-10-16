@@ -12,18 +12,18 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 import pyvisa
-from PyQt6.QtCore import QObject, QSettings, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
+from PyQt6.QtCore import QObject, QRectF, QSettings, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
-    QRadioButton, QWidgetAction,
+    QRadioButton, QToolButton, QWidgetAction,
 )
 
 from . import export
 from .instrument import (
     MEMORY_MEM_OPTION, MAX_RATE_DIG, RANGES, Acquisition, CaptureHooks, DeviceInfo, DigitizerConfig,
-    Function, Integration, Timing, TriggerSource, TruevoltDMM, range_label, resource_for,
+    Function, Integration, Timing, TriggerSource, TruevoltDMM, find_gaps, range_label, resource_for,
 )
 
 PROTOCOLS = ("HiSLIP", "VXI-11", "Socket")
@@ -37,6 +37,9 @@ SAMPLE_RATES = (10, 20, 50, 100, 200, 500, 1e3, 2e3, 5e3, 10e3, 20e3, 50e3)
 TRACE_COLOR = "#f0c000"
 MARKER_SIZE = 5
 MARKER_MIN_SPACING = 3.0       # px between samples before "Line + points" draws markers
+GAP_COLOR = (255, 70, 70, 90)  # translucent red for missing (overload) samples
+GAP_MIN_WIDTH_PX = 3           # a single missing sample stays visible when zoomed out
+GAP_CONTEXT_SAMPLES = 200      # minimum view width when jumping to a gap
 
 
 def format_duration(seconds: float) -> str:
@@ -69,6 +72,55 @@ class TraceItem(pg.PlotDataItem):
         if finite.size == 0:
             return None, None
         return float(finite.min()), float(finite.max())
+
+
+class GapBands(pg.GraphicsObject):
+    """Translucent full-height bands over runs of missing (overload) samples.
+
+    Each band is drawn at least GAP_MIN_WIDTH_PX wide so a single missing sample stays visible
+    when zoomed out, and bands that would touch on screen are merged.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._starts = self._stops = np.empty(0)   # band edges, s
+        self._brush = pg.mkBrush(GAP_COLOR)
+        self.setZValue(-10)                        # behind the trace
+
+    def set_gaps(self, gaps: np.ndarray, interval: float) -> None:
+        # Centre each band on its missing samples: from half an interval before the first
+        # to half an interval after the last.
+        self._starts = (gaps[:, 0] - 0.5) * interval
+        self._stops = (gaps[:, 1] - 0.5) * interval
+        self.update()
+
+    def viewRangeChanged(self) -> None:
+        self.prepareGeometryChange()
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        view = self.viewRect()
+        return QRectF() if view is None else view
+
+    def paint(self, painter, *_) -> None:
+        view = self.viewRect()
+        px = self.pixelWidth()
+        if view is None or not px or len(self._starts) == 0:
+            return
+        lo = np.searchsorted(self._stops, view.left())
+        hi = np.searchsorted(self._starts, view.right(), side="right")
+        if lo >= hi:
+            return
+        starts, stops = self._starts[lo:hi].copy(), self._stops[lo:hi].copy()
+        pad = np.maximum(0.0, (GAP_MIN_WIDTH_PX * px - (stops - starts)) / 2)
+        starts -= pad
+        stops += pad
+        first = np.r_[0, np.flatnonzero(starts[1:] > stops[:-1] + px) + 1]  # merge bands < 1 px apart
+        starts, stops = starts[first], np.maximum.reduceat(stops, first)
+        painter.setPen(pg.mkPen(None))
+        painter.setBrush(self._brush)
+        for a, b in zip(starts, stops):
+            painter.drawRect(QRectF(a, view.top(), b - a, view.height()))
 
 
 class _WorkerHooks(CaptureHooks):
@@ -381,6 +433,23 @@ class MainWindow(QMainWindow):
             "Points: markers only. Zoomed out, each marker is the min or max of a group of samples.")
         self.plot_style.currentIndexChanged.connect(self._apply_plot_style)
         bar.addWidget(self.plot_style)
+        bar.addSpacing(12)
+        self.show_gaps = QCheckBox("Show gaps")
+        self.show_gaps.setToolTip(
+            "Shade time ranges with missing (overload) samples in red. Bands are at least "
+            f"{GAP_MIN_WIDTH_PX} px wide,\nso even a single missing sample is visible when zoomed out.")
+        self.show_gaps.setChecked(True)
+        bar.addWidget(self.show_gaps)
+        self.prev_gap_btn = QToolButton()
+        self.prev_gap_btn.setArrowType(Qt.ArrowType.LeftArrow)
+        self.prev_gap_btn.setToolTip("Previous gap: zoom to the previous run of missing samples")
+        self.prev_gap_btn.clicked.connect(lambda: self._goto_gap(-1))
+        self.next_gap_btn = QToolButton()
+        self.next_gap_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.next_gap_btn.setToolTip("Next gap: zoom to the next run of missing samples")
+        self.next_gap_btn.clicked.connect(lambda: self._goto_gap(1))
+        bar.addWidget(self.prev_gap_btn)
+        bar.addWidget(self.next_gap_btn)
         bar.addStretch(1)
         bar.addWidget(QLabel("Format"))
         self.export_format = QButtonGroup(self)
@@ -421,12 +490,18 @@ class MainWindow(QMainWindow):
         self._trace_pen = pg.mkPen(TRACE_COLOR, width=1)
         self.curve = TraceItem(pen=self._trace_pen)
         self.plot.addItem(self.curve)
+        self.gap_bands = GapBands()
+        self.plot.addItem(self.gap_bands, ignoreBounds=True)
+        self.show_gaps.toggled.connect(self.gap_bands.setVisible)
+        self._gaps = np.empty((0, 2), dtype=int)
+        self._gap_nav: tuple[int, tuple[float, float]] | None = None  # last gap jumped to, and its view
         self.curve.setSymbolSize(MARKER_SIZE)
         self.curve.setSymbolBrush(TRACE_COLOR)
         self.curve.setSymbolPen(None)
         vb = self.plot.getViewBox()
         vb.sigXRangeChanged.connect(lambda *_: self._stats_timer.start())
         vb.sigXRangeChanged.connect(self._update_markers)
+        vb.sigXRangeChanged.connect(self._update_gap_buttons)
         vb.sigResized.connect(self._update_markers)
         # pyqtgraph's context-menu "Points" option only affects curves that already have a symbol,
         # so it does nothing here; the Style box replaces it.
@@ -486,6 +561,7 @@ class MainWindow(QMainWindow):
         self.impedance.setCurrentIndex(s.value("impedance", 0, int))
         self.integration.setCurrentIndex(s.value("integration", 0, int))
         self.plot_style.setCurrentIndex(s.value("plot_style", 0, int))
+        self.show_gaps.setChecked(s.value("show_gaps", True, bool))
         fmt = s.value("export_format", "CSV", str)
         for button in self.export_format.buttons():
             button.setChecked(button.text() == fmt)
@@ -506,6 +582,7 @@ class MainWindow(QMainWindow):
         s.setValue("impedance", self.impedance.currentIndex())
         s.setValue("integration", self.integration.currentIndex())
         s.setValue("plot_style", self.plot_style.currentIndex())
+        s.setValue("show_gaps", self.show_gaps.isChecked())
         s.setValue("export_format", self.export_format.checkedButton().text())
         s.setValue("trigger_mode", self.trigger_mode.currentIndex())
         s.setValue("rate_hz", self.rate.currentData())
@@ -552,6 +629,7 @@ class MainWindow(QMainWindow):
         has_data = self.acq is not None and len(self.acq.values) > 0 and not self._capturing
         self.save_view_btn.setEnabled(has_data)
         self.save_all_btn.setEnabled(has_data)
+        self._update_gap_buttons()
 
     def _select_rate(self, rate: float) -> None:
         """Select the enabled sample rate closest to rate."""
@@ -723,6 +801,7 @@ class MainWindow(QMainWindow):
             return
         n = len(values)
         self.curve.setData(self._live_time[:n], values)
+        self._set_gaps(values, timing.interval)
         self.progress.setValue(n)
         self.statusBar().showMessage(f"Capture {self._run_captures + 1}: {n:,} / {timing.num_samples:,} samples")
 
@@ -750,6 +829,7 @@ class MainWindow(QMainWindow):
         self._update_markers()
         n = len(acq.values)
         self.curve.setData(acq.time, acq.values)
+        self._set_gaps(acq.values, acq.interval)
         if n > 1:
             self.plot.getViewBox().setLimits(xMin=0, xMax=(n - 1) * acq.interval, minXRange=5 * acq.interval)
         self.plot.setTitle(
@@ -833,21 +913,76 @@ class MainWindow(QMainWindow):
         stop = min(len(acq.values), math.floor(x1 / acq.interval + 1e-6) + 1)
         return start, max(start, stop)
 
+    def _set_gaps(self, values: np.ndarray, interval: float) -> None:
+        self._gaps = find_gaps(values)
+        self.gap_bands.set_gaps(self._gaps, interval)
+        self._gap_nav = None
+
+    def _target_gap(self, step: int) -> int | None:
+        """Index of the gap that Previous (step -1) or Next (+1) would jump to, or None."""
+        if self.acq is None or self._capturing or len(self._gaps) == 0:
+            return None
+        dt = self.acq.interval
+        x0, x1 = self.plot.getViewBox().viewRange()[0]
+        if self._gap_nav is not None and np.allclose(self._gap_nav[1], (x0, x1), rtol=0, atol=dt / 10):
+            i = self._gap_nav[0] + step          # view unchanged since the last jump: step from that gap
+        elif x0 <= dt and x1 >= (len(self.acq.values) - 2) * dt:
+            i = 0 if step > 0 else len(self._gaps) - 1   # whole capture visible: start at an end
+        else:
+            centers = (self._gaps[:, 0] + self._gaps[:, 1] - 1) / 2 * dt
+            mid = (x0 + x1) / 2
+            if step > 0:
+                i = int(np.searchsorted(centers, mid + dt / 2, side="right"))
+            else:
+                i = int(np.searchsorted(centers, mid - dt / 2, side="left")) - 1
+        return i if 0 <= i < len(self._gaps) else None
+
+    def _goto_gap(self, step: int) -> None:
+        i = self._target_gap(step)
+        if i is None:
+            return
+        dt = self.acq.interval
+        start, stop = self._gaps[i]
+        vb = self.plot.getViewBox()
+        x0, x1 = vb.viewRange()[0]
+        # Frame the gap with context; keep the current zoom if it already does that sensibly.
+        target = max(3 * (stop - start), GAP_CONTEXT_SAMPLES) * dt
+        width = x1 - x0
+        if not target <= width <= max(target, 0.1 * len(self.acq.values) * dt):
+            width = target
+        center = (start + stop - 1) / 2 * dt
+        vb.setXRange(center - width / 2, center + width / 2, padding=0)
+        vb.enableAutoRange(y=True)
+        self._gap_nav = (i, tuple(vb.viewRange()[0]))
+        self._update_gap_buttons()
+        n = stop - start
+        self.statusBar().showMessage(
+            f"Gap {i + 1} of {len(self._gaps)}: {n:,} sample{'s' if n != 1 else ''} "
+            f"({pg.siFormat(n * dt, suffix='s')}) at {pg.siFormat(start * dt, precision=7, suffix='s')}", 10000)
+
+    def _update_gap_buttons(self, *_) -> None:
+        self.prev_gap_btn.setEnabled(self._target_gap(-1) is not None)
+        self.next_gap_btn.setEnabled(self._target_gap(1) is not None)
+
     def _update_stats(self) -> None:
         if self.acq is None or self._capturing:
             return
         start, stop = self._visible_range()
         window = self.acq.values[start:stop]
         finite = window[np.isfinite(window)]
+        missing = ""
+        if finite.size < window.size:
+            gaps = int(((self._gaps[:, 1] > start) & (self._gaps[:, 0] < stop)).sum())
+            missing = f"   ⚠ {window.size - finite.size:,} missing in {gaps:,} gap{'s' if gaps != 1 else ''}"
         if finite.size == 0:
-            self.stats_label.setText(f"View: {len(window):,} samples")
+            self.stats_label.setText(f"View: {len(window):,} samples{missing}")
             return
         unit = self.acq.unit
         fmt = lambda v: pg.siFormat(float(v), precision=6, suffix=unit)
         lo, hi = finite.min(), finite.max()
         self.stats_label.setText(
             f"View: {len(window):,} samples   mean {fmt(finite.mean())}   σ {fmt(finite.std())}   "
-            f"min {fmt(lo)}   max {fmt(hi)}   p-p {fmt(hi - lo)}")
+            f"min {fmt(lo)}   max {fmt(hi)}   p-p {fmt(hi - lo)}{missing}")
 
     def _on_mouse_moved(self, pos) -> None:
         vb = self.plot.getViewBox()
@@ -857,7 +992,8 @@ class MainWindow(QMainWindow):
         i = round(x / self.acq.interval)
         if 0 <= i < len(self.acq.values):
             t = pg.siFormat(i * self.acq.interval, precision=7, suffix="s")
-            v = pg.siFormat(float(self.acq.values[i]), precision=7, suffix=self.acq.unit)
+            value = float(self.acq.values[i])
+            v = "overload" if math.isnan(value) else pg.siFormat(value, precision=7, suffix=self.acq.unit)
             self.cursor_label.setText(f"#{i:,}   t = {t}   {v}")
 
     def _save(self, view_only: bool) -> None:

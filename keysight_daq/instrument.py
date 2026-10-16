@@ -92,6 +92,12 @@ RANGES: dict[Function, list[tuple[float, str]]] = {
 }
 
 
+def find_gaps(values: np.ndarray) -> np.ndarray:
+    """Runs of missing (NaN, i.e. overload) samples as an (n, 2) array of [start, stop) indices."""
+    edges = np.diff(np.isnan(values).astype(np.int8), prepend=0, append=0)
+    return np.column_stack((np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+
+
 def range_label(function: Function, value: float) -> str:
     return next((label for v, label in RANGES[function] if math.isclose(v, value)), f"{value:g} {function.unit}")
 
@@ -453,6 +459,7 @@ class TruevoltDMM:
                         f"DATA:REM? {count}", datatype="d", is_big_endian=False, container=np.array)
                     if len(block) != count:
                         raise InstrumentError(f"Expected {count} readings, received {len(block)}.")
+                    block[np.abs(block) >= OVERLOAD_THRESHOLD] = np.nan  # overloads become gaps
                     values[got:got + count] = block
                     got += count
                     last_data = time.monotonic()
@@ -477,10 +484,11 @@ class TruevoltDMM:
 
     def _check_status(self, values: np.ndarray) -> list[str]:
         warnings = []
-        overload = np.abs(values) >= OVERLOAD_THRESHOLD
-        if overload.any():
-            values[overload] = np.nan
-            warnings.append(f"{overload.sum():,} overload readings (input exceeded range) are shown as gaps.")
+        missing = int(np.isnan(values).sum())
+        if missing:
+            gaps = len(find_gaps(values))
+            warnings.append(f"{missing:,} overload readings (input exceeded range) are shown as "
+                            f"{gaps:,} gap{'s' if gaps != 1 else ''} in the trace.")
         ques = self.query_int("STAT:QUES:EVEN?")
         if ques & QUES_TIMING_VIOLATION:
             warnings.append("Instrument reported a sample timing violation; sample timing may not be valid.")
