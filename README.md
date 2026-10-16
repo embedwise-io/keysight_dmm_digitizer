@@ -4,6 +4,10 @@ GUI for high-speed digitizing (up to 50 kSa/s) of DC voltage or DC current with 
 Keysight 34465A or 34470A DMM over LAN. It configures the DMM, streams the readings
 back while the acquisition runs, and plots the result with zoom and save.
 
+Release notes are in [CHANGELOG.md](CHANGELOG.md).
+
+![Keysight Truevolt Digitizer: a 20 s, 20 kSa/s capture of a 4.2 V source in Manual trigger mode](assets/gui.png)
+
 ## Setup
 
 ```sh

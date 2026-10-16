@@ -20,12 +20,13 @@ from PyQt6.QtWidgets import (
     QRadioButton, QToolButton, QWidgetAction,
 )
 
-from . import export
+from . import __version__, export
 from .instrument import (
     MEMORY_MEM_OPTION, MAX_RATE_DIG, RANGES, Acquisition, CaptureHooks, DeviceInfo, DigitizerConfig,
     Function, Integration, Timing, TriggerSource, TruevoltDMM, find_gaps, range_label, resource_for,
 )
 
+APP_NAME = "Keysight Truevolt Digitizer"
 PROTOCOLS = ("HiSLIP", "VXI-11", "Socket")
 TRIGGER_MODES = (("Auto (continuous)", TriggerSource.IMMEDIATE), ("Manual", TriggerSource.BUS))
 LIVE_PLOT_PERIOD = 0.25        # s between plot refreshes while acquiring
@@ -245,7 +246,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, resource: str | None = None, protocol: str | None = None):
         super().__init__()
-        self.setWindowTitle("Keysight Truevolt Digitizer")
+        self.setWindowTitle(f"{APP_NAME} v{__version__}")
         self.settings = QSettings("EmbedWise", "KeysightDAQ")
         self.info: DeviceInfo | None = None
         self.acq: Acquisition | None = None      # capture on display
@@ -1045,10 +1046,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Digitize with a Keysight 34465A/34470A over LAN.")
     parser.add_argument("--resource", help="IP address, hostname, or VISA resource string to prefill")
     parser.add_argument("--protocol", choices=PROTOCOLS, help="LAN protocol used with an IP/hostname")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
 
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("Keysight Truevolt Digitizer")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
     window = MainWindow(args.resource, args.protocol)
     window.show()
     sys.exit(app.exec())

@@ -26,6 +26,8 @@ from datetime import datetime
 import numpy as np
 import pyvisa
 
+from . import __version__
+
 SUPPORTED_MODELS = ("34465A", "34470A")
 
 # Reading memory depth with and without the MEM option.
@@ -206,6 +208,7 @@ class Acquisition:
     def metadata(self) -> dict[str, str]:
         cfg = self.config
         meta = {
+            "software": f"keysight-daq {__version__}",
             "instrument": f"{self.device.manufacturer} {self.device.model}",
             "serial": self.device.serial,
             "firmware": self.device.firmware,

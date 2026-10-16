@@ -1,6 +1,6 @@
 [project]
 name = "keysight-daq"
-version = "0.1.0"
+dynamic = ["version"]   # from keysight_daq.__version__
 description = "Digitizing GUI for Keysight Truevolt 34465A/34470A DMMs over LAN"
 requires-python = ">=3.12"
 # Minimum versions are the ones this was tested with; uv.lock pins the exact set (uv sync).
@@ -27,3 +27,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["keysight_daq"]
+
+[tool.setuptools.dynamic]
+version = { attr = "keysight_daq.__version__" }
