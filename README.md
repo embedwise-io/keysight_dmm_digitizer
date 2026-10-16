@@ -7,9 +7,19 @@ back while the acquisition runs, and plots the result with zoom and save.
 ## Setup
 
 ```sh
-uv venv .venv && uv pip install --python .venv/bin/python -e .
-# or: python -m venv .venv && .venv/bin/pip install -e .
+uv sync                      # creates .venv with the exact versions pinned in uv.lock
+uv sync --extra usb          # also install PyUSB for USB connections
 ```
+
+Dependency versions are pinned:
+
+- **`uv.lock`** pins every package, including indirect ones, with hashes.
+- **`.python-version`** pins Python 3.14.
+- **`pyproject.toml`** lists the minimum versions this was tested with.
+
+To move to newer releases, run `uv lock --upgrade` and then `uv sync`, retest, and
+commit the updated `uv.lock`. Without uv, `python -m venv .venv && .venv/bin/pip install -e .`
+also works, but it installs the newest compatible versions rather than the pinned ones.
 
 The default VISA backend is `pyvisa-py` (pure Python), so the Keysight IO Libraries are
 not required. If they are installed, PyVISA uses them automatically.
@@ -40,10 +50,36 @@ not required. If they are installed, PyVISA uses them automatically.
    - **Points** always shows markers. Zoomed out, each marker is the min or max of a group
      of samples.
 5. **Save View…** writes only the displayed samples; **Save All…** writes the whole capture.
-   Saving works when stopped, and in Manual mode while the DMM is armed. CSV files carry a
-   `#` metadata header (`pandas.read_csv(path, comment="#")`). Use `.npz` for large captures.
+   **Format** chooses CSV or HDF5 (see below). Saving works when stopped, and in Manual
+   mode while the DMM is armed.
 
 Settings and recent addresses are remembered between sessions.
+
+## Saved files
+
+| | CSV (`.csv`) | HDF5 (`.h5`, `.hdf5`) |
+|---|---|---|
+| Contents | `time_s` and `voltage_V` or `current_A` columns, after `#` metadata lines | Dataset `values` (float64), with the metadata as its attributes |
+| Values | 9 significant digits | Exact: binary, losslessly compressed (gzip + shuffle) |
+| Size of a 50k-sample capture (shorted input) | 1.15 MB | 0.15 MB |
+| Size of 2M samples (synthetic noisy data) | 39 MB (3.0 s to write) | 10 MB (0.15 s) |
+| Opens in | Anything | h5py, MATLAB (`h5read`), HDFView, `h5dump` |
+
+HDF5 files don't store a time column, because samples are evenly spaced. Rebuild it from
+the `t0_s` and `sample_interval_s` attributes. `t0_s` is non-zero for a **Save View**
+slice. The files use the modern HDF5 format, readable by HDF5 1.14 and later.
+
+```python
+import pandas as pd
+df = pd.read_csv("capture.csv", comment="#")
+
+import h5py, numpy as np
+with h5py.File("capture.h5") as f:
+    ds = f["values"]
+    v = ds[...]
+    t = ds.attrs["t0_s"] + np.arange(len(v)) * ds.attrs["sample_interval_s"]
+    meta = dict(ds.attrs)   # instrument, serial, range, integration, units, started, ...
+```
 
 ## How it works
 
@@ -163,4 +199,10 @@ time-aligned V, I, and P = V·I.
 - **Captures longer than reading memory.** Streaming already keeps up at 50 kSa/s over LAN
   (a 2M-point, 40 s capture had no overflow), so continuous logging to disk is feasible.
 - **USB connection.** See the Notes section above.
+- **HDF5 2.0 file format.** Exports currently use the format readable by HDF5 1.14+
+  (`HDF5_LIBVER` in `export.py`). h5py already bundles HDF5 2.0, but files in its newest
+  format can't be read by tools built on HDF5 1.x: Fedora's `h5dump` 1.14.6 failed on one,
+  and HDFView and MATLAB are likely affected too. Once those tools support HDF5 2.0,
+  re-evaluate. It is a one-line change: set the low bound to `"latest"`, check what the 2.0
+  format adds, and confirm your tools open the files.
 

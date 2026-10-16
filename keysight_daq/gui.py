@@ -15,9 +15,9 @@ import pyvisa
 from PyQt6.QtCore import QObject, QSettings, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
-    QWidgetAction,
+    QRadioButton, QWidgetAction,
 )
 
 from . import export
@@ -382,6 +382,19 @@ class MainWindow(QMainWindow):
         self.plot_style.currentIndexChanged.connect(self._apply_plot_style)
         bar.addWidget(self.plot_style)
         bar.addStretch(1)
+        bar.addWidget(QLabel("Format"))
+        self.export_format = QButtonGroup(self)
+        tips = {
+            "CSV": "Text: time and value columns after a # metadata header. Opens anywhere; larger files.",
+            "HDF5": "Binary, lossless, compressed: a 'values' dataset with the metadata as attributes.\n"
+                    "Time is t0_s + n × sample_interval_s.",
+        }
+        for fmt in export.FORMATS:
+            button = QRadioButton(fmt)
+            button.setToolTip(tips[fmt])
+            self.export_format.addButton(button)
+            bar.addWidget(button)
+        bar.addSpacing(8)
         self.save_view_btn = QPushButton("Save View…")
         self.save_view_btn.setToolTip("Save the samples in the displayed time window (Ctrl+S)")
         self.save_view_btn.clicked.connect(lambda: self._save(view_only=True))
@@ -473,6 +486,11 @@ class MainWindow(QMainWindow):
         self.impedance.setCurrentIndex(s.value("impedance", 0, int))
         self.integration.setCurrentIndex(s.value("integration", 0, int))
         self.plot_style.setCurrentIndex(s.value("plot_style", 0, int))
+        fmt = s.value("export_format", "CSV", str)
+        for button in self.export_format.buttons():
+            button.setChecked(button.text() == fmt)
+        if self.export_format.checkedButton() is None:
+            self.export_format.buttons()[0].setChecked(True)
         self.trigger_mode.setCurrentIndex(s.value("trigger_mode", 0, int))
         self._select_rate(s.value("rate_hz", 50e3, float))
         self.duration.setValue(s.value("duration_s", 1.0, float))
@@ -488,6 +506,7 @@ class MainWindow(QMainWindow):
         s.setValue("impedance", self.impedance.currentIndex())
         s.setValue("integration", self.integration.currentIndex())
         s.setValue("plot_style", self.plot_style.currentIndex())
+        s.setValue("export_format", self.export_format.checkedButton().text())
         s.setValue("trigger_mode", self.trigger_mode.currentIndex())
         s.setValue("rate_hz", self.rate.currentData())
         s.setValue("duration_s", self.duration.value())
@@ -849,21 +868,24 @@ class MainWindow(QMainWindow):
         if stop <= start:
             QMessageBox.information(self, "Nothing to save", "No samples are inside the displayed time window.")
             return
+        fmt = self.export_format.checkedButton().text()
+        suffixes = export.FORMATS[fmt]
         name = f"{acq.device.model}_{acq.config.function.name}_{acq.started:%Y%m%d-%H%M%S}"
-        name += "_view.csv" if view_only else ".csv"
+        name += ("_view" if view_only else "") + suffixes[0]
         directory = self.settings.value("save_dir", str(Path.home()), str)
-        path, selected = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self, "Save displayed data" if view_only else "Save all data",
-            str(Path(directory) / name), export.FILE_FILTERS)
+            str(Path(directory) / name), f"{fmt} ({' '.join('*' + s for s in suffixes)})")
         if not path:
             return
         path = Path(path)
-        if path.suffix.lower() not in (".csv", ".npz"):
-            path = path.with_suffix(".npz" if "npz" in selected else ".csv")
+        if export.format_for(path) != fmt:
+            # Another format's suffix (e.g. .csv with HDF5 selected) is swapped; anything else is appended to.
+            path = path.with_suffix(suffixes[0]) if export.format_for(path) else path.with_name(path.name + suffixes[0])
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             count = export.save(path, acq, start, stop)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             QMessageBox.critical(self, "Save failed", str(e))
             return
         finally:
