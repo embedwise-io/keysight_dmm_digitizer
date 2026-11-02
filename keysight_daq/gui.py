@@ -7,15 +7,17 @@ import math
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
 import pyvisa
-from PyQt6.QtCore import QObject, QRectF, QSettings, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import QEvent, QObject, QRectF, QSettings, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+    QGroupBox, QHBoxLayout, QLabel, QScrollArea,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
     QRadioButton, QToolBar, QToolButton, QWidgetAction,
 )
@@ -23,8 +25,9 @@ from PyQt6.QtWidgets import (
 from . import __version__, export
 from .instrument import (
     MEMORY_MEM_OPTION, MAX_RATE_DIG, RANGES, Acquisition, CaptureHooks, DeviceInfo, DigitizerConfig,
-    Function, Integration, Timing, TriggerSource, TruevoltDMM, find_gaps, range_label, resource_for,
+    Function, Integration, Timing, TriggerSource, TruevoltDMM, find_gaps, range_label, resource_for, samples_between,
 )
+from .measurements import MeasurementsPanel, PlotViewBox, PopOutWindow
 
 APP_NAME = "Keysight Truevolt Digitizer"
 PROTOCOLS = ("HiSLIP", "VXI-11", "Socket")
@@ -244,10 +247,11 @@ class MainWindow(QMainWindow):
     request_close = Signal()
     request_run = Signal(object)
 
-    def __init__(self, resource: str | None = None, protocol: str | None = None):
+    def __init__(self, resource: str | None = None, protocol: str | None = None,
+                 settings: QSettings | None = None):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{__version__}")
-        self.settings = QSettings("EmbedWise", "KeysightDAQ")
+        self.settings = settings or QSettings("EmbedWise", "KeysightDAQ")
         self.info: DeviceInfo | None = None
         self.acq: Acquisition | None = None      # capture on display
         self._busy = False                       # scanning, connecting, or disconnecting
@@ -259,7 +263,7 @@ class MainWindow(QMainWindow):
         self._new_run = False                    # next capture is the first of a run
         self._live_time: np.ndarray | None = None
         self._display_interval: float | None = None  # sample interval of the trace on screen
-        self._markers_shown: bool | None = None
+        self._points_shown: bool | None = None
         self._range_choice = {f: self.settings.value(f"range/{f.name}", DEFAULT_RANGE[f], float) for f in Function}
 
         self._build_ui()
@@ -282,6 +286,36 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.splitter)
         self.resize(1360, 780)
 
+        # The Measurements panel sits in a dock beside the plot, or in a window of its own (Pop Out).
+        # The dock doesn't float or move: Qt moves floating docks itself, which Wayland doesn't allow.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self.measurements)
+        scroll.setMinimumWidth(self.measurements.minimumWidth() + scroll.verticalScrollBar().sizeHint().width())
+        self.pop_out_btn = QPushButton()
+        self.pop_out_btn.clicked.connect(lambda: self._set_popped_out(not self._popped_out))
+        self.measure_view = QWidget()               # what moves between the dock and the window
+        view = QVBoxLayout(self.measure_view)
+        view.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        row.setContentsMargins(9, 6, 9, 0)
+        row.addStretch(1)
+        row.addWidget(self.pop_out_btn)
+        view.addLayout(row)
+        view.addWidget(scroll)
+        self.measure_dock = QDockWidget("Measurements", self)
+        self.measure_dock.setObjectName("measurements")
+        self.measure_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measure_dock)
+        self.measure_dock.hide()
+        self.measure_window = PopOutWindow("Measurements", self)
+        self.measure_window.resize(scroll.minimumWidth() + 24, 800)
+        self.measure_window.closed.connect(self._on_measure_window_closed)
+        self._popped_out = False
+        self._set_popped_out(False)
+
         shortcuts = [
             (QKeySequence("F5"), self._on_run),
             (QKeySequence("F6"), self._on_trigger),
@@ -289,6 +323,7 @@ class MainWindow(QMainWindow):
             (QKeySequence(QKeySequence.StandardKey.ZoomOut), lambda: self._zoom(2.0)),
             (QKeySequence("Ctrl+0"), self._fit),
             (QKeySequence(QKeySequence.StandardKey.Save), lambda: self._save(view_only=True)),
+            (QKeySequence("Esc"), self.measurements.clear_box),
         ]
         for key, slot in shortcuts:
             QShortcut(key, self).activated.connect(slot)
@@ -451,12 +486,24 @@ class MainWindow(QMainWindow):
         self.box_zoom_btn.setToolTip("Drag a rectangle to zoom. When off, drag pans; wheel zooms; right-drag scales.")
         self.box_zoom_btn.toggled.connect(self._on_box_zoom)
         bar.addWidget(self.box_zoom_btn)
+        self.select_btn = self._tool_button(
+            "Select", "Drag a rectangle over the trace for statistics of the samples inside it.\n"
+                      "Drag a corner to resize it, or the inside to move it. Esc clears it. When off, drag pans.")
+        self.select_btn.setCheckable(True)
+        self.select_btn.toggled.connect(self._on_select)
+        bar.addWidget(self.select_btn)
+        self.markers_btn = self._tool_button(
+            "Markers", "X1, X2 (time) and Y1, Y2 (level) markers, read out in the Measurements panel.\n"
+                       "Drag a marker to move it; right-click the plot to place one there. Click again to clear them.")
+        self.markers_btn.setCheckable(True)
+        self.markers_btn.clicked.connect(self._on_markers_clicked)
+        bar.addWidget(self.markers_btn)
         bar.addSeparator()
         self.plot_style = QComboBox()
         self.plot_style.addItems(PLOT_STYLES)
         self.plot_style.setToolTip(
-            "Line + points: markers appear once you zoom in far enough to tell samples apart.\n"
-            "Points: markers only. Zoomed out, each marker is the min or max of a group of samples.")
+            "Line + points: a dot for each sample once you zoom in far enough to tell samples apart.\n"
+            "Points: dots only. Zoomed out, each dot is the min or max of a group of samples.")
         self.plot_style.currentIndexChanged.connect(self._apply_plot_style)
         bar.addWidget(self._group(QLabel("Style"), self.plot_style))
         bar.addSeparator()
@@ -508,7 +555,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.warning_label)
 
         pg.setConfigOptions(antialias=False)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(viewBox=PlotViewBox())
         self.plot.showGrid(x=True, y=True, alpha=0.3)
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setDownsampling(auto=True, mode="peak")
@@ -527,9 +574,9 @@ class MainWindow(QMainWindow):
         self.curve.setSymbolPen(None)
         vb = self.plot.getViewBox()
         vb.sigXRangeChanged.connect(lambda *_: self._stats_timer.start())
-        vb.sigXRangeChanged.connect(self._update_markers)
+        vb.sigXRangeChanged.connect(self._update_point_markers)
         vb.sigXRangeChanged.connect(self._update_gap_buttons)
-        vb.sigResized.connect(self._update_markers)
+        vb.sigResized.connect(self._update_point_markers)
         # pyqtgraph's context-menu "Points" option only affects curves that already have a symbol,
         # so it does nothing here; the Style box replaces it.
         plot_item = self.plot.getPlotItem()
@@ -539,14 +586,28 @@ class MainWindow(QMainWindow):
                                for a in submenu.actions()):
                 action.setVisible(False)
         self.plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        vb.sigSelecting.connect(lambda start, end, finished: self.measurements.drag_box(start, end, finished))
+        self.measurements = MeasurementsPanel(self.plot.getPlotItem())
+        self.measurements.changed.connect(self._on_measurements_changed)
+        self._add_measure_actions(vb)
         layout.addWidget(self.plot, 1)
 
         info = QHBoxLayout()
         self.stats_label = QLabel()
         self.stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.stats_label.setWordWrap(True)  # wrap rather than force a wide window
+        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.cursor_label = QLabel()
-        self.cursor_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.cursor_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        # The two labels share the row, and the statistics wrap. Neither may change size with the
+        # values shown, or the plot above would resize as the mouse moves: the cursor readout keeps
+        # the width of its longest text, and the statistics the height of theirs (_reserve_stats_height).
+        widest = self._cursor_text(8_888_888, 888.8888e-3, -888.8888e-3, "V")
+        self.cursor_label.setMinimumWidth(self.cursor_label.fontMetrics().horizontalAdvance(widest) + 2)
+        self._stats_probe = QLabel(self._stats_text(8_888_888, -888.888e-3, 888.888e-3, -888.888e-3,
+                                                    -888.888e-3, 8_888_888, 888_888, "V"))
+        self._stats_probe.setWordWrap(True)        # never shown: measures the longest statistics text
+        self.stats_label.installEventFilter(self)
         info.addWidget(self.stats_label, 1)
         info.addWidget(self.cursor_label)
         layout.addLayout(info)
@@ -602,6 +663,9 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geometry)
         if splitter := s.value("splitter"):
             self.splitter.restoreState(splitter)
+        if geometry := s.value("measurements_geometry"):
+            self.measure_window.restoreGeometry(geometry)
+        self._set_popped_out(s.value("measurements_popped_out", False, bool))
 
     def _save_settings(self) -> None:
         s = self.settings
@@ -619,6 +683,8 @@ class MainWindow(QMainWindow):
         s.setValue("duration_s", self.duration.value())
         s.setValue("geometry", self.saveGeometry())
         s.setValue("splitter", self.splitter.saveState())
+        s.setValue("measurements_popped_out", self._popped_out)
+        s.setValue("measurements_geometry", self.measure_window.saveGeometry())
 
     def _remember_address(self, text: str) -> None:
         history = [text] + [h for h in self.settings.value("history", [], list) if h != text]
@@ -814,7 +880,7 @@ class MainWindow(QMainWindow):
         self._capturing = True
         self._live_time = np.arange(timing.num_samples) * timing.interval
         self._display_interval = timing.interval
-        self._update_markers()
+        self._update_point_markers()
         self._set_progress(maximum=timing.num_samples)
         if self._new_run:
             # Fit the first capture of a run; later captures keep whatever view the user chose.
@@ -837,6 +903,7 @@ class MainWindow(QMainWindow):
         n = len(values)
         self.curve.setData(self._live_time[:n], values)
         self._set_gaps(values, timing.interval)
+        self.measurements.set_data(values, timing.interval, self.current_function().unit, capturing=True)
         self.progress.setValue(n)
         self.statusBar().showMessage(f"Capture {self._run_captures + 1}: {n:,} / {timing.num_samples:,} samples")
 
@@ -861,7 +928,7 @@ class MainWindow(QMainWindow):
     def _show(self, acq: Acquisition) -> None:
         self.acq = acq
         self._display_interval = acq.interval
-        self._update_markers()
+        self._update_point_markers()
         n = len(acq.values)
         self.curve.setData(acq.time, acq.values)
         self._set_gaps(acq.values, acq.interval)
@@ -877,6 +944,7 @@ class MainWindow(QMainWindow):
         self.warning_label.setVisible(bool(acq.warnings))
         self._update_controls()
         self._update_stats()
+        self.measurements.set_data(acq.values, acq.interval, acq.unit, capturing=self._capturing)
 
     @Slot()
     def _on_run_finished(self) -> None:
@@ -918,13 +986,13 @@ class MainWindow(QMainWindow):
 
     def _apply_plot_style(self) -> None:
         self.curve.setPen(None if self.plot_style.currentText() == "Points" else self._trace_pen)
-        self._update_markers()
+        self._update_point_markers()
 
-    def _update_markers(self, *_) -> None:
+    def _update_point_markers(self, *_) -> None:
         style = self.plot_style.currentText()
         show = style == "Points" or (style == "Line + points" and self._samples_resolved())
-        if show != self._markers_shown:
-            self._markers_shown = show
+        if show != self._points_shown:
+            self._points_shown = show
             self.curve.setSymbol("o" if show else None)
 
     def _samples_resolved(self) -> bool:
@@ -937,16 +1005,83 @@ class MainWindow(QMainWindow):
         return samples > 0 and vb.width() / samples >= MARKER_MIN_SPACING
 
     def _on_box_zoom(self, enabled: bool) -> None:
+        if enabled:
+            self.select_btn.setChecked(False)
         vb = self.plot.getViewBox()
         vb.setMouseMode(pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode)
 
+    def _on_select(self, enabled: bool) -> None:
+        if enabled:
+            self.box_zoom_btn.setChecked(False)
+        self.plot.getViewBox().selecting = enabled
+        self.measurements.set_box_movable(enabled)
+        if enabled:
+            self.plot.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.plot.unsetCursor()
+
+    def _on_markers_clicked(self, checked: bool) -> None:
+        if checked:
+            self.measurements.place_markers()
+        else:
+            self.measurements.clear_markers()
+
+    def _on_measurements_changed(self) -> None:
+        """Show the Measurements panel (docked or popped out) while there are markers or a selection."""
+        m = self.measurements
+        self.markers_btn.setChecked(m.has_markers)
+        active = m.has_markers or m.has_box
+        self.measure_dock.setVisible(active and not self._popped_out)
+        if not (active and self._popped_out):
+            self.measure_window.hide()
+        elif not self.measure_window.isVisible():
+            self.measure_window.show()
+            self.measure_window.raise_()
+
+    def _set_popped_out(self, popped: bool) -> None:
+        """Move the Measurements panel into its own window, or back into the dock beside the plot."""
+        self._popped_out = popped
+        if popped:
+            self.measure_window.layout().addWidget(self.measure_view)
+        else:
+            self.measure_dock.setWidget(self.measure_view)
+        self.measure_view.show()
+        self.pop_out_btn.setText("Dock" if popped else "Pop Out")
+        self.pop_out_btn.setToolTip(
+            "Put the measurements back beside the plot" if popped else
+            "Show the measurements in a window of their own, which you can move anywhere.\n"
+            "Closing that window clears the markers and the selection.")
+        self._on_measurements_changed()
+
+    def _on_measure_window_closed(self) -> None:
+        self.measurements.clear_markers()
+        self.measurements.clear_box()
+
+    def _add_measure_actions(self, vb: PlotViewBox) -> None:
+        """Right-click menu entries: place a marker where the menu was opened, and clear."""
+        menu = vb.menu
+        first = menu.actions()[0]
+        for name in ("X1", "X2", "Y1", "Y2"):
+            action = QAction(f"Place {name} Here", menu)
+            action.triggered.connect(partial(self._place_marker, name))
+            menu.insertAction(first, action)
+        clear_markers = QAction("Clear Markers", menu)
+        clear_markers.triggered.connect(self.measurements.clear_markers)
+        clear_selection = QAction("Clear Selection", menu)
+        clear_selection.triggered.connect(self.measurements.clear_box)
+        menu.insertActions(first, [clear_markers, clear_selection])
+        menu.insertSeparator(first)
+        menu.aboutToShow.connect(lambda: (clear_markers.setEnabled(self.measurements.has_markers),
+                                          clear_selection.setEnabled(self.measurements.has_box)))
+
+    def _place_marker(self, name: str) -> None:
+        point = self.plot.getViewBox().menu_point
+        if point is not None:
+            self.measurements.place_marker(name, point)
+
     def _visible_range(self) -> tuple[int, int]:
         """Sample index range [start, stop) inside the displayed time window."""
-        acq = self.acq
-        x0, x1 = self.plot.getViewBox().viewRange()[0]
-        start = max(0, math.ceil(x0 / acq.interval - 1e-6))
-        stop = min(len(acq.values), math.floor(x1 / acq.interval + 1e-6) + 1)
-        return start, max(start, stop)
+        return samples_between(*self.plot.getViewBox().viewRange()[0], self.acq.interval, len(self.acq.values))
 
     def _set_gaps(self, values: np.ndarray, interval: float) -> None:
         self._gaps = find_gaps(values)
@@ -1005,19 +1140,40 @@ class MainWindow(QMainWindow):
         start, stop = self._visible_range()
         window = self.acq.values[start:stop]
         finite = window[np.isfinite(window)]
-        missing = ""
-        if finite.size < window.size:
-            gaps = int(((self._gaps[:, 1] > start) & (self._gaps[:, 0] < stop)).sum())
-            missing = f"   ⚠ {window.size - finite.size:,} missing in {gaps:,} gap{'s' if gaps != 1 else ''}"
+        missing = window.size - finite.size
+        gaps = int(((self._gaps[:, 1] > start) & (self._gaps[:, 0] < stop)).sum()) if missing else 0
         if finite.size == 0:
-            self.stats_label.setText(f"View: {len(window):,} samples{missing}")
+            self.stats_label.setText(self._stats_text(window.size, None, None, None, None, missing, gaps, ""))
             return
-        unit = self.acq.unit
-        fmt = lambda v: pg.siFormat(float(v), precision=6, suffix=unit)
-        lo, hi = finite.min(), finite.max()
-        self.stats_label.setText(
-            f"View: {len(window):,} samples   mean {fmt(finite.mean())}   σ {fmt(finite.std())}   "
-            f"min {fmt(lo)}   max {fmt(hi)}   p-p {fmt(hi - lo)}{missing}")
+        self.stats_label.setText(self._stats_text(window.size, finite.mean(), finite.std(), finite.min(),
+                                                  finite.max(), missing, gaps, self.acq.unit))
+
+    @staticmethod
+    def _stats_text(samples: int, mean, std, lo, hi, missing: int, gaps: int, unit: str) -> str:
+        """The statistics line for the displayed window (mean etc. None when no sample is valid)."""
+        text = f"View: {samples:,} samples"
+        if mean is not None:
+            fmt = lambda v: pg.siFormat(float(v), precision=6, suffix=unit)
+            text += f"   mean {fmt(mean)}   σ {fmt(std)}   min {fmt(lo)}   max {fmt(hi)}   p-p {fmt(hi - lo)}"
+        if missing:
+            text += f"   ⚠ {missing:,} missing in {gaps:,} gap{'s' if gaps != 1 else ''}"
+        return text
+
+    def _reserve_stats_height(self) -> None:
+        """Keep the statistics as tall as their longest text needs at the current width.
+
+        So their height changes only with the window width, not with the values: otherwise a line
+        that wraps or unwraps as you zoom, or as the cursor readout beside it changes, would
+        resize the plot.
+        """
+        label = self.stats_label
+        self._stats_probe.setFont(label.font())
+        label.setMinimumHeight(self._stats_probe.heightForWidth(max(1, label.contentsRect().width())))
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.stats_label and event.type() == QEvent.Type.Resize:
+            self._reserve_stats_height()
+        return super().eventFilter(obj, event)
 
     def _on_mouse_moved(self, pos) -> None:
         vb = self.plot.getViewBox()
@@ -1026,10 +1182,14 @@ class MainWindow(QMainWindow):
         x = vb.mapSceneToView(pos).x()
         i = round(x / self.acq.interval)
         if 0 <= i < len(self.acq.values):
-            t = pg.siFormat(i * self.acq.interval, precision=7, suffix="s")
-            value = float(self.acq.values[i])
-            v = "overload" if math.isnan(value) else pg.siFormat(value, precision=7, suffix=self.acq.unit)
-            self.cursor_label.setText(f"#{i:,}   t = {t}   {v}")
+            self.cursor_label.setText(
+                self._cursor_text(i, i * self.acq.interval, float(self.acq.values[i]), self.acq.unit))
+
+    @staticmethod
+    def _cursor_text(i: int, t: float, value: float, unit: str) -> str:
+        """The sample under the mouse: index, time and value."""
+        v = "overload" if math.isnan(value) else pg.siFormat(value, precision=7, suffix=unit)
+        return f"#{i:,}   t = {pg.siFormat(t, precision=7, suffix='s')}   {v}"
 
     def _save(self, view_only: bool) -> None:
         acq = self.acq

@@ -3,6 +3,52 @@
 Notable changes to Keysight Truevolt Digitizer. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-11-02
+
+### Added
+
+- **Markers.** X1 and X2 mark times, and Y1 and Y2 mark levels. Each is a labelled line you
+  drag to move: magenta for X, green for Y. Place them with the **Markers** button, or at a
+  point from the plot's right-click menu. The Measurements panel shows:
+  - the time at X1 and X2, the reading there ("overload" in a gap), ΔX = X2 − X1 with the
+    difference in reading, and 1/ΔX;
+  - the levels at Y1 and Y2, ΔY = Y2 − Y1 and 1/ΔY.
+
+  Switching between DC voltage and DC current clears the Y markers, since they are levels
+  in volts or amps.
+- **Selection box.** With **Select** on, dragging draws a translucent box instead of
+  panning. The Measurements panel shows:
+  - the points in the box's time range, and any overloads there;
+  - the points in the box (also between its levels);
+  - the time in the box, with its share of the time range (e.g. the time above a
+    threshold);
+  - the min, mean, max and σ of the points in the box.
+
+  Drag a corner to resize the box, or, with Select on, the inside to move it. **Esc**
+  clears it.
+- **Measurements panel.** It shows beside the plot while there are markers or a selection.
+  **Pop Out** moves it into a window of its own, which can be moved on Wayland, unlike a
+  floating dock. Closing that window clears the markers and the selection. **Dock** puts it
+  back. Whether it is docked or popped out is remembered.
+- **Tests.** A pytest suite (`uv sync --extra test && .venv/bin/pytest`) covers:
+  - the analysis helpers;
+  - trigger modes, gap navigation and saving, against the simulator;
+  - the markers and selection box, driven with the mouse.
+
+### Fixed
+
+- **Plot resizing as the mouse moved.** The cursor readout under the plot changed width
+  with the value under the mouse. That changed where the statistics beside it wrapped, so
+  the plot grew and shrank with the number of lines. It was most noticeable in narrow
+  windows, or with the Measurements panel open. The readout now keeps the width of its
+  longest text, and the statistics keep the height their longest text needs at the current
+  width.
+
+### Changed
+
+- **Style wording.** The Style option's per-sample dots are now called dots rather than
+  markers, to avoid confusion with the new markers.
+
 ## [1.0.1] — 2026-10-16
 
 ### Fixed

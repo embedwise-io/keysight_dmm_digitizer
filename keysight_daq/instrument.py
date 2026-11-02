@@ -100,6 +100,36 @@ def find_gaps(values: np.ndarray) -> np.ndarray:
     return np.column_stack((np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
 
+def samples_between(t0: float, t1: float, interval: float, n: int) -> tuple[int, int]:
+    """Sample range [start, stop) whose times (index × interval) lie in [t0, t1], within [0, n)."""
+    start = min(n, max(0, math.ceil(t0 / interval - 1e-6)))
+    stop = min(n, math.floor(t1 / interval + 1e-6) + 1)
+    return start, max(start, stop)
+
+
+@dataclass(frozen=True)
+class BoxStats:
+    """Samples inside a selection box: in its time span, and of those, between its levels."""
+    span: int          # valid samples in the time span
+    missing: int       # overload (NaN) samples in the time span
+    count: int         # valid samples between the levels
+    mean: float
+    std: float
+    min: float
+    max: float
+
+
+def box_stats(values: np.ndarray, start: int, stop: int, lo: float, hi: float) -> BoxStats:
+    """Statistics of values[start:stop] that lie in [lo, hi]; missing (NaN) samples are left out."""
+    x = values[start:stop]
+    valid = int(np.isfinite(x).sum())
+    inside = x[(x >= lo) & (x <= hi)]                # NaN compares false, so missing samples drop out
+    if inside.size == 0:
+        return BoxStats(valid, x.size - valid, 0, math.nan, math.nan, math.nan, math.nan)
+    return BoxStats(valid, x.size - valid, int(inside.size), float(inside.mean()), float(inside.std()),
+                    float(inside.min()), float(inside.max()))
+
+
 def range_label(function: Function, value: float) -> str:
     return next((label for v, label in RANGES[function] if math.isclose(v, value)), f"{value:g} {function.unit}")
 

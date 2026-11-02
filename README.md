@@ -6,7 +6,7 @@ back while the acquisition runs, and plots the result with zoom and save.
 
 Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
-![Keysight Truevolt Digitizer: a 20 s, 20 kSa/s capture of a 4.2 V source in Manual trigger mode](assets/gui.png)
+![Keysight Truevolt Digitizer v1.1.0: a 20 kSa/s capture with X and Y markers, a selection box and the Measurements panel, in Manual trigger mode](assets/gui.png)
 
 ## Setup
 
@@ -50,10 +50,10 @@ not required. If they are installed, PyVISA uses them automatically.
    is kept for later captures. The statistics line covers the displayed window. In a narrow
    window, toolbar controls that don't fit move to the **»** menu at the toolbar's right end.
    **Style** selects Line, Line + points, or Points:
-   - **Line + points** adds markers once samples are at least 3 px apart on screen, so
-     zoom in to see them.
-   - **Points** always shows markers. Zoomed out, each marker is the min or max of a group
-     of samples.
+   - **Line + points** adds a dot for each sample once samples are at least 3 px apart on
+     screen, so zoom in to see them.
+   - **Points** shows only the dots. Zoomed out, each dot is the min or max of a group of
+     samples.
 
    **Show gaps** shades missing (overload) samples with translucent red bands. Each band is
    at least 3 px wide, so a single missing sample in 100k is still visible, and bands
@@ -65,7 +65,36 @@ not required. If they are installed, PyVISA uses them automatically.
    - After you pan, they continue from where you're looking, and a zoom you've set is kept.
    - They are enabled only when the capture has gaps in that direction, and the status bar
      shows e.g. "Gap 3 of 9: 40 samples (800 µs) at 1.5 s".
-5. **Save View…** writes only the displayed samples; **Save All…** writes the whole capture.
+5. **Markers** places X1 and X2 (magenta: times) and Y1 and Y2 (green: levels), and opens
+   the **Measurements** panel. Drag a marker to move it, or right-click the plot and choose
+   **Place X1 Here** (and so on) to put one at that point. The panel shows:
+   - for X1 and X2: the time, the reading at that sample ("overload" in a gap), ΔX = X2 − X1
+     with the difference in reading, and 1/ΔX in Hz;
+   - for Y1 and Y2: the level, ΔY = Y2 − Y1 and 1/ΔY.
+
+   **Clear** in the panel, or clicking **Markers** again, removes them. Y markers are
+   levels in volts or amps, so switching between DC voltage and DC current clears them; X
+   markers stay.
+6. **Select** works like **Box Zoom**: while it is on, dragging draws a selection box
+   instead of panning. The box is translucent, so the samples stay visible. The panel shows
+   its time range and levels and:
+   - **Points in time range:** samples between the box's left and right edges, and
+     **Overloads in time range** if there are any;
+   - **Points in box:** of those, the ones also between its bottom and top edges;
+   - **Time in box:** points in box × the sample interval, with its share of the time range.
+     With the bottom edge at a threshold, that is the time above it (or a duty cycle);
+   - min, mean, max and σ of the points in box.
+
+   Overloads are left out of the statistics. Drag a corner to resize the box; with
+   **Select** on, drag the inside to move it. A new box replaces the old one. **Esc** or
+   **Clear** removes it. During a capture, the statistics wait until it is complete.
+
+   The Measurements panel shows beside the plot while there are markers or a selection.
+   **Pop Out** moves it into a window of its own that you can put anywhere, and gives the
+   plot its full width back (with the panel docked, some toolbar controls may move to the
+   **»** menu). **Dock** puts it back. Closing that window clears the markers and the
+   selection. Docked or popped out is remembered.
+7. **Save View…** writes only the displayed samples; **Save All…** writes the whole capture.
    **Format** chooses CSV or HDF5 (see below). Saving works when stopped, and in Manual
    mode while the DMM is armed.
 
@@ -179,6 +208,16 @@ work on the GUI without hardware:
 .venv/bin/python tools/dmm_simulator.py        # add --no-mem / --no-dig / -v
 .venv/bin/keysight-daq --resource TCPIP::127.0.0.1::5025::SOCKET
 ```
+
+## Tests
+
+```sh
+uv sync --extra test && .venv/bin/pytest
+```
+
+The tests cover the analysis helpers, the main window against the simulator (trigger modes,
+gap navigation, saving), and the markers and selection box, driven with the mouse. They run
+in about 12 s. A plain `uv sync` removes pytest again.
 
 ## Notes
 
